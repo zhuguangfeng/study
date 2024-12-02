@@ -1,8 +1,15 @@
 package cache
 
 import (
+	"errors"
+	"fmt"
 	"sync"
 	"time"
+)
+
+var (
+	errKeyNotFound = errors.New("cache: 键不存在")
+	errKeyExpired  = errors.New("键过期")
 )
 
 type item struct {
@@ -83,16 +90,55 @@ func (c *BuildInMapCache) set(key string, val any, expiration time.Duration) err
 }
 
 // 获取缓存
-func (c *BuildInMapCache) Get(key string) (any, bool) {
-
+func (c *BuildInMapCache) Get(key string) (any, error) {
+	c.mutex.Lock()
+	res, ok := c.data[key]
+	c.mutex.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("%w,key:%s", errKeyNotFound, key)
+	}
+	now := time.Now()
+	if res.deadlineBefore(now) {
+		c.mutex.Lock()
+		defer c.mutex.Unlock()
+		res, ok = c.data[key]
+		if res.deadlineBefore(now) {
+			c.delete(key)
+			return nil, fmt.Errorf("%w,key:%s", errKeyNotFound, key)
+		}
+	}
+	return res.val, nil
 }
 
 // 删除缓存
 func (c *BuildInMapCache) Delete(key string) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.delete(key)
+	return nil
+}
 
+func (c *BuildInMapCache) delete(key string) {
+	item, ok := c.data[key]
+	if !ok {
+		return
+	}
+	delete(c.data, key)
+	c.onEvicted(key, item.val)
+}
+
+func (c *BuildInMapCache) Close() error {
+	c.close <- struct{}{}
+	return nil
 }
 
 // 判断是否过期
 func (i *item) deadlineBefore(t time.Time) bool {
 	return !i.deadline.IsZero() && i.deadline.Before(t)
+}
+
+func BuildInMapCacheWithEvictedCallback(fn func(key string, val any)) BuildInMapCacheOption {
+	return func(cache *BuildInMapCache) {
+		cache.onEvicted = fn
+	}
 }
